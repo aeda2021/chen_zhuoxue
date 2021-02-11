@@ -1,0 +1,92 @@
+# Zhuoxue Chen HW 4
+# Likelihood
+
+Q1:
+
+A: We expect the test statistic value is increasing with the value of p. The test statistic value will be the smallest around 
+p = 0.2, which means when p = 0.2, the likelihood is the highest. (lower Chi sq value)
+
+Q2:
+
+(a):plot(chi~p.test)
+      abline(h=3.84,col = "blue")
+
+(b) abline(h=1.92,col = "blue")
+To get this estimate, we looked at critical chi-square statistic at one direction and get 1.92 for the abline. The intercept of the abline and the plot shows the 95% CI.
+
+Q3: 
+(a) The 95% CI is from 0.149 to 0.259.
+
+b) 
+L2 <- dbinom(20, 100, p.test)
+plot(p.test, L2, type = 'l')
+# CIs:
+abline(v = .149, lty = 2)
+abline(v = .259, lty = 2)
+
+Q4: 
+(a) The distributions show that the likelihood increases as df increases.We can see as more df we have, the more likely the density
+close to 0.2. When we increase df, the distribution shifts to the right.
+
+(b) When we add more variables, which means the degrees of freedom increase, the model shows a better fit even the variables might
+not related. 
+
+Q5: Considering that the likelihood ratio test is only valid for nested models,
+     define the p-value explicitly in the context of the question the likelihood ratio test asks
+     and the null hypothesis being tested.
+     (Hints: what is the definition of a p-value?
+             In a likelihood ratio test, what is being observed? More specifically, what is the test statistic?
+             What is the null hypothesis?)
+
+p-value means the likelihood of getting results that show the null hypothesis is right.In likelihood ratio test, the null hypothesis is the models' likelihoods are not different that the model with less parameters performance the same as other models.When we have high chi square, the null hypothesis is rejected that these two models are different.
+
+
+fm0 <- glm(Survived ~ 1 , family = "binomial", data = titanic)
+fm1 <- glm(Survived ~ Sex, family = "binomial", data = titanic)
+fm2 <- glm(Survived ~ Sex+Age , family = "binomial", data = titanic)
+
+Q6: Interpret this output:
+a)  Each value is refer to how the model with one more variable perform comparing to the previous model. The higher the chi sq value, the higher the likelihood of the larger model (model with more variables). The smaller the p-value, the more confident to reject null hypothesis.
+b) The model with less variables have the same likelihood with the model with more variables.
+c)Sex
+
+
+fm0 <- glm(Survived ~ 1 , family = "binomial", data = titanic)
+fm1 <- glm(Survived ~ Pclass, family = "binomial", data = titanic)
+fm2 <- glm(Survived ~ Fare, family = "binomial", data = titanic)
+fm3 <- glm(Survived ~ Age, family = "binomial", data = titanic)
+fm4 <- glm(Survived ~ Fare+Pclass+Age , family = "binomial", data = titanic)
+
+model.sel(fm0,fm1,fm2,fm3,fm4)
+
+Q8: How do you know these models are not nested?
+The next model does not have the same variables as the previous model.
+
+Q9: What is 'delta-AIC' and why is this more relevant than the raw AIC values?
+A: delta-AIC is the AIC value of one model minus the best model's AIC. By looking at the delta-AIC, we can directly know which model is the best, by finding the smallest number.
+
+Q10: Interpret your output - which model is best? Which variables most important?
+fm 4 is the best and Pclass is the most important variable.
+
+
+fitp <- fitdist(dat.test,"pois")
+summary(fitp)
+fitnb <- fitdist(dat.test,"nbinom")
+summary(fitnb)
+
+Q11: a) Which distribution is the best?
+A: The negative binomial.
+
+b) On what basis are we making this inference? That is, what are really comparing?
+(Think about the mathematical definition of likelihood, and how it is calculated.)
+A: We are looking at the higher likelihood value and lower AIC.
+
+
+Q12: Describe the difference between these approaches. What is my goal in each scenario?
+ What questions am I asking, and what am I left with at the end?
+In this case, we need to consider the effect of more variables in our model. When we have a bunch of variables in the model, the model fit can be better, which might influence the whole research. Sometimes unrelated variables will be counted if we don't have enought background research. But also, in terms of discovery procedure, literature based data can be limited, this can be the barrier to the true science or mechanisms behind the data.
+
+# Q13: Briefly, how might you interpret this? Which variables do you think are most important?
+I might try to look at the delta AIC first, and find several model candidates, then choose the model with the least df to minimize the uncertainty of variables in this model. In this case, I will choose model 1097.
+
+
