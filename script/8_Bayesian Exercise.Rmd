@@ -1,0 +1,517 @@
+---
+title: "AEDA - Bayesian Modeling"
+output:
+  pdf_document: default
+  html_notebook: default
+date: 'Last updated: March 3, 2021'
+---
+
+```{r setup, include = F}
+library(lme4)
+library(R2jags)
+library(tidyverse)
+library(MASS)
+# The following are functions from John Kruschke's book Doing Bayesian Data Analysis 
+# that are really helpful for visualizing results from Bayesian models:
+source("8_bayesFunctions.R")
+```
+
+# JAGS, an introduction
+Before we get into how to code and run our models, let's briefly consider the alogrithm and software we are running. The software is JAGS (Just Another Gibbs Sampler), which compiles a number of algorithms to estimate Bayesian posteriors using Markov Chain Monte Carlo (MCMC) sampling.
+
+MCMC samplers estimate marginal posterior probability distributions by effectively *sampling* values from those distributions. That sounds like magic, but it's actually just very clever. When we formulate our models, we say that the posterior distribution is proportional to the distribution described by the product of the likelihood and the priors. What MCMC does is samples possible values of each parameter with a frequency governed by the *relative likelihood* of that value, given the distribution described by that likelihood*prior product. So values of a parameter with a high relative likelihood get sampled frequently, and values with a low relative likelihood get sampled infrequently. It does this in a manner conceptually similar to numeric maximum likelihood estimators: drunkenly hiking around parameter space. Except whereas in MLE we really just want the peak of the mountain, in MCMC we want a topography map of the whole mountain. In the end, JAGS gives us a collection of sampled parameter values. Imagine the hikers have GPS that ping coordinates and altitude every few seconds as they explore the mountain. We describe the posterior distributions by looking at the empirical distributions of these GPS pings. This is called a Monte Carlo process because we are describing probability distribuions using empircal samples, and it's a Marcov Chain process because the algorithm moves around parameter space in sequence, from one location to the next (like a hiker taking steps up or down slope). As a result, each value in the chain depends on the previous sampled value.
+
+Effectively, how JAGS operates is to 1) start with either a given or random starting value for each parameter. 2) Calculate the likelihood of the model given these parameters, 3) sample a new value for one parameter, while holding all others constant. The new value is drawn from a narrow probability distribution around the current value. If the new value is more likely than the current value, keep it; if it is less likely than the current value, discard it and stay with the current value. 4) Move to the next parameter and choose a new value as in (3). 5) Repeat (4) for each parameter; sampling every parameter once in this way constitutes one step, or iteration, of the MCMC algorithm. 6) Repeat (2-5) for something like 10,000 or more iterations. In practice, we will discard the first few thousand iterations, because we only want to estimate the posterior based on the samples taken once the model has 'converged' on the correct area of parameter space. After this 'burn in' period, we keep track of the values in each step. These values form an empirical estimation of each parameter's marginal posterior distribution.
+
+Another general practice is to run the MCMC algorithm multiple times, in parallel. These parallel runs are called "chains," and offer some insurance against the possibility that the MCMC algorithm gets stuck at a local maximum in probability space (imagine a bimodal distribution - we want to describe the whole distribution, but the algorithm might get stuck in one of those peaks).
+
+Okay, with that, let's write some models in JAGS.
+
+# Simple linear model
+
+Let's start with a simple linear model. Because it can be illuminating to see how well our statistical methods can capture things we know to be true, we'll simulate some data.
+
+Let's imagine we measure some continuous variable and two things we expect to drive it. Here, I say the true population mean is 15, then use rnorm() to generate the predictor variables according to standard-normal distribution (i.e. mean 0, sd 1). It is usually good practice to make your own data (at least your predictor variables) conform to the standard normal by centering and scaling (subtracting the mean from each datum and dividing by the standard deviation). There are couple reasons for this. First is practical, and might be my own personal preference: it makes effect sizes comparable among your predictor variables (by making effect size relative to how much that thing actually varies; i.e. effect per standard deviation). Second, there are big computational benefits. The drunken hikers are way better at finding the peak when variables are measured on the same scale because they have the same distance to cover in each direction. This is especially important for MCMC algorithms.
+
+I also assign a standard deviation of 4 to the model (i.e. residual variance = 16).
+
+Lastly, I run a frequentist linear model that we can use to compare to our Bayesian model, once we have results.
+
+```{r Basic lm sim}
+# Total number of observations:
+N <- 100
+# True parameter values:
+b0 <- 15
+b1 <- 3
+b2 <- 1.5
+
+# Observed predictors:
+x1 <- rnorm(N)
+x2 <- rnorm(N)
+
+# Standard deviation of the model
+s <- 4
+
+# Observations:
+y <- rnorm(N, mean = b0 + b1*x1 + b2*x2, sd = s)
+
+# Model:
+fm <-lm(y ~ x1 + x2)
+```
+
+Next I'll include the code to run the same basic linear model in JAGS. You may see this done elsewhere in a few different ways, often by saving as, and then calling it back from, a text file. By using the R2jags package we can save it as a "function" within the R environment. I like this method because you get all the syntax help from RSTudio (e.g. matching parentheses). If you write it as a text string (i.e. within quotation marks), it all shows up as the same color and RStudio doesn't pay attention to syntax.
+
+*Question*: The data we just simulated were generated by the model y = b0 + b1x1 + e. Translate this model into a Bayesian network and write out the mathemtatical probability statement for the posterior probability of the model (i.e. [b0, b1, e] is proportional to...) Give the mean and betas normal priors with mean 0 and variance of 100, and the variance parameter a gamma prior parameters 1 and 0.01.
+
+
+
+Before we code this out, some things to note about JAGS syntax:
+
+* The for() loop is not the same in R. It is not iterating an operation, but instead making repeated "declarations" (JAGS is considered a 'declarative' programming language). Remember that the Bayesian model is essentially a long product of probability expressions. The likelihood in a Bayesian model (as in the rest of life, actually) is the product of the probabilities of each datum given the model. In mathematical notation, we use a $\Pi$ symbol to denote the product across a series of expressions. This isn't perfect, but you can think of the for() loop in JAGS as the product symbol. The for() loop expands this product to give JAGS an explicit delcaration for each data point. That is, it will explicitly declare a probability statement for each observation. After the for() loop, we include the expressions for the prior probabilities. We do not include the priors within the loop because we do not need to declare an independent prior for each observation, we only declare them once.
+
+* When you specify a normal distribution (using the dnrom() function), you do not supply standard deviation (as you do in R) or varaince, but *precision*. Precision is the inverse of variance (i.e. $1/ \sigma^2$). I could speculate as to why this is, but this is not the place. Just know that's a thing, and that when I say dnorm(0,0.01), I mean a normal distribution with mean = 0 and variance = 100 (or sd = 10).
+
+* Random variables are denoted using the tilde (~), while fixed values are denoted using the assignment operator (<-). So, in a JAGS model, you can say that $y_i$ is a realization of a normal process with mean $\mu_i$ and variance $\sigma^2$ by writing y[i] ~ norm(mu[i], 1/sigma^2) (remember that JAGS takes precision, not variance), and you can say that each $\mu_i$ is defined by the linear model $\beta_0 + \beta_1 X_{1i}$ by writing mu[i] <- beta0 + beta1*X[i]. In each of these cases, we are indexing variables by observations, i, using brackets.
+
+Just as important, something to remember about about priors:
+
+Even a vague prior contains information. These are often called "uninformative" priors, but this is arguably a misnomer; even if they are non-specific or imprecise, a prior inherently carries with it an assumption over the sort of values a parameter can take and, therefore, its underlying generative process. This can cause problems if you make impossible assumptions, like providing a normal prior for a variance term (this assumes variance can be negative). It can also cause problems if you make silly assumptions. For instance, it is common to put uniform priors on variance parameters (e.g. $\sigma \sim unif(0,100)$). This assumes that there is equal probability that your standard deviation is 0.001 and 100. If your parameter space (governed by your range of observed values $\mathbf{y}$) is limited to values between -10 and 10, how probable is a variance of 10,000? Putting so much probability mass where it obviously doesn't belong can affect your posteriors, especially with small sample sizes.
+
+Okay, that's enough. Here's the model. I used the same priors I described above. The gamma prior suggests variance is more likely to be small than large. (If you want to see what this really means, plot the prior: `hist(rgamma(1000, 1, 0.01))` .)
+
+```{r JAGS linear model}
+lm.mod <- function(){
+  # Likelihood:
+  # (remember that the for() loops stands in for the product symbol,
+  # so it is going to declare the statements within the loop for each value of i.)
+  for(i in 1:N){
+    # each y_i is a realization of a normal process with mean mu_i and variance sig.sq
+    y[i] ~ dnorm(mu[i], 1/sig.sq) 
+    # mu_i is defined deterministically with a linear model.
+    # (we could have simply written out the linear model within dnrom() above, but this
+    # reads more clearly to me.)
+    mu[i] <- alpha + b1*x1[i] + b2*x2[i]
+  } # we end the loop because we are done with variables indexed by i
+  
+  # Priors:
+  alpha ~ dnorm(0, 0.01) # precision .01 = variance 100
+  b1 ~ dnorm(0, 0.01)
+  b2 ~ dnorm(0, 0.01)
+  
+  sig.sq ~ dgamma(1, 0.01)
+  sigma <- sqrt(sig.sq) 
+  # Because we simulated the data with standard deviation, that's what we want to look at
+  # All this last bit is doing is giving us a transformed variable for convenience.
+  # It isn't interacting with the rest of the model.
+}
+```
+
+
+To run the model in JAGS, we need to create a named list of all our variables, and provide initial values for the algorithm (i.e., give our partying hikers a trailhead). 
+
+We need to supply initial values for every variable that gets a prior. That is, for every variable that isn't conditioned on another variable in the model (in a Bayesian network, this is every variable that does not have an arrow pointing to it). Remember that we will run the model multiple times in parallel, each run called a 'chain.' (Each chain is like its own hiker exploring Probaiblity Mountain.) It is good practice to provide unique inital values for each chain (let every hiker start out on their own). The intial value, by default, is the mean of the prior, which would mean the default is for each chain to have the same initial value. To give them independent values, I instead take random draws from their priors.
+
+Initial values need to be provided as a list of named lists, which is kind of annoying. I show a couple ways of doing it. The first is to write out each sublist independently. This is good if you are providing explicit and intentional value for each chain. This might actually be good practice so that you can make sure your initial values are dispersed well across your prior. However, I am not convinced this is of utmost importance, given a solid burn-in period, and I am lazy, so I typically just the use the replicate command with rdist() functions.
+
+```{r JAGS set up lm}
+# Here we take all the data from our R environment that appear in our JAGS model and save them into a list.
+# Each element in the list is named for how it appears in the JAGS model.
+dataList.lm <- list(
+  y = y, # the observations
+  N = length(y), # the number of observations (used to parameterize the for() loops)
+  x1 = x1, # predictor data
+  x2 = x2
+)
+
+# Next we create a list of intitial values. Each chain gets its own list of values, 
+# each named for the variable in the JAGS model.
+# We then compile each chain's list into a list of lists.
+
+# The clearer but longer way of doing initial values:
+# initial.values.lm <- list(
+#   list(alpha = rnorm(1, 0, 30), 
+#       b1 = rnorm(1, 0, 30), b2 = 
+#       rnorm(1, 0, 30), 
+#       sig.sq = rgamma(1, 1, .01)
+#     ),
+#   list(alpha = rnorm(1, 0, 30), 
+#       b1 = rnorm(1, 0, 30), 
+#       b2 = rnorm(1, 0, 30), 
+#       sig.sq = rgamma(1, 1, .01)
+#     ),
+#   list(alpha = rnorm(1, 0, 30), 
+#       b1 = rnorm(1, 0, 30), 
+#       b2 = rnorm(1, 0, 30), 
+#       sig.sq = rgamma(1, 1, .01)
+#     )
+# )
+
+# We can also to do the same thing with less text 
+# (but in a non-intuitive way...):
+# This is nice because it takes less space, 
+# and bc you can change the number of chains just by changing 
+# the first argument of replicate()
+
+initial.values.lm <- replicate(3, list(list(
+  alpha = rnorm(1, 0, 30), 
+  b1 = rnorm(1, 0, 30), 
+  b2 = rnorm(1, 0, 30), 
+  sig.sq = rgamma(1, 1, .01)
+)))
+```
+
+Now we run the model. The jags() function from the R2jags package needs a model, a data list, and a vector with the names of parameters you will want posteiors for. Adding parameters will not add computation time, but will add to the size of the object you save. (That is, it will take posterior draws for every variable in the model regardless, this is just saying which ones it records.) The rest have defaults, but I provide some values for the ones I think matter:
+
+* The number of iterations (n.iter) is the total number of draws from the posterior distribution that JAGS will take.
+* The burn-in period (n.burnin) is the number of draws that are discarded before JAGS starts recording. If you think of the initial values as the random places across the park where the drunken hikers wake up after their black out, the burn-in period is the time during which they find their trail head. Once they get to the right mountain, they will crawl all around it to describe its topography, and this is what we want to record. The burn-in period is them finding their way there from the parking lot, or the pit toilet, or where ever, and we don't care about the topography of the parking lot.
+* The number of chains is the number of drunken hikers. With more hikers, it takes less time to explore the mountain. This is especially helpful if you are using parall processing, because each hiker (chain) can be operated by a separate processor core. It is considered good practice to have at least three chains.
+* Thinning (n.thin) is a process in which we only save one in so many draws. This is to reduce autocorrelation in the posterior draws. Here, with a simple model, saving one in three is sufficient. Sometimes, in complex models especially, you will need to save fewer, and therefore run more total iterations to maintain sample size. You can asess this heuristically by looking at traceplots (see below) or quantitatively by calculating 'effective sample size,' which adjusts for autocorrelation.
+
+At the bottom, I convert the model object into a couple useful forms. The MCMC object is helpful for visualizing each chain indpendently to assess convergence (did all the hikers find the same area of the mountain?), whereas the dataframe is more useful for plotting the posterior distributions.
+
+```{r Run JAGS lm}
+fm.jags.lm <- jags(
+  model.file = lm.mod,
+  data = dataList.lm,
+  inits = initial.values.lm,
+  parameters.to.save = c('alpha', 'b1', 'b2', 'sigma'),
+  n.iter = 20000,
+  n.burnin = 5000,
+  n.chains = 3,
+  n.thin = 3
+)
+fm.lm.mcmc <- as.mcmc(fm.jags.lm)
+fm.lm.dat <- as.data.frame(as.matrix(fm.lm.mcmc))
+```
+
+Here we check diagnostics for the model. 
+
+First we create a traceplot of each parameter. A traceplot shows each posterior draw in sequence, with the chains laid atop one another. That is, it is a line plot in which the x-axis is the index number of each iteration of the MCMC process in sequence, and the y-axis is the value of the parameter at each draw. Each chain is given its own color, and the lines are drawn on top of one another. We can use these to visually assess "convergence," which is whether the chains have all arrived in the same region of parameter space. The primary thing we are looking for is that the traceplots all overlap - not perfectly, they are independent, stochastic processes, but that they zig zag up and down across the same general range of values. The second thing we want to see is that the lines travel up and down freely, rather than slowly arcing. This can be a sign that there is really high autocorrelation between samples. There is always some, which is why we thin, but in complex models the algorithm can have trouble moving around parameter space - essentially, the hikers to too small of steps, and move too slowly around the landscape. When this is the case, we essentially have pseudoreplication among our posterior draws.
+
+Second, we calculate the Gelman diagnostic, which is a quantitative measure of convergence. It is based on a comparison of within- to between-chain variance, analogous to an ANOVA (i.e. are the chains different?). Ideally, the diagnostic value is 1.0. General rule of thumb is <1.1 is okay.
+
+In each of these, our diagnostics look great. All the of the chains are plotted atop one another, and our Gelman diagnostics all equal 1. More complex models often don't look as good.
+```{r lm diagnostics}
+traceplot(fm.lm.mcmc)
+gelman.diag(fm.lm.mcmc)
+```
+
+Next are the resulting marginal posterior distributions. 
+
+Looking at the plots, notice Kruschke's function gives the mode, rather than the mean. This is because sometimes posteriors are skewed, and we typically care about where the bulk of probability mass lies, so we use the mode because the mean is influenced by long tails (though this is preference, and if a distribution is really skewed both parameters are actually going to be of interest). In a truly normal distribution, these are the same. The posteriors for variance parameters, though, often come out right-skewed, even when they are given uniform priors. These plots also show the 'highest density interval,' which is the smallest range of values to contain 95% of the probaiblity mass. It is an empirical method of getting 95% CIs, and is slightly different than quantiles. Don't worry about the distinction for now. I am not sure there is a consensus on which is better, and they are typically much the same. I use this function here mainly because the plots are pretty!
+
+Kruschke's function also outputs effective sample size (ESS) for each parameter. Because MCMC is an autocorrelative process, sometimes your posterior draws are not sufficiently independent. ESS measures autocorrelation in your posterior draws and gives an adjusted measure of your sample size. Here, our model is simple and JAGS had no problem. ESS is nearly equal to the 15000 draws we saved.
+
+```{r lm results}
+plotPost(fm.lm.dat$alpha, main = "intercept")
+plotPost(fm.lm.dat$b1, main = 'beta 1')
+plotPost(fm.lm.dat$b2, main = 'beta 2')
+plotPost(fm.lm.dat$sig, main = 'sd')
+summary(fm)
+```
+
+*Question*: these plots represent the marginal posterior probability distributions for each parameter. What is a marginal probability, and what does this mean in the context of the model?
+
+# Hierarchical model:
+
+Next, we'll use a similar dataset, but one in which measurements were taken across 10 different sites. Because plots within sites may be more like eachother than they are like plots from other sites, measurements within a site are not truly independent. This is especially a problem if some sites have more observations than others, as we have in this dataset. The result is that these sites with more observations drive the result more strongly. So what we want is to use the equivalent of a mixed-effects model that includes site-level variation. In Bayesian, because everything is a random variable, we don't really have mixed effects, so we just call it a hierarchical model.
+
+```{r}
+# Run this to read in the data:
+lmm.data <- read.csv("8_mixedEffectDat.csv")
+```
+
+*Question*: Draw a Bayesian network and write out the probability statement for a random intercept model with two predictor variables. Give normal priors (means, betas) means of 0 and variances of 100, and gamma priors (variance terms) parameters of 1, 0.01. Index sites by j, and observations within sites by i.
+
+
+This will not translate as directly into JAGs code. The reason is that indexing sites in a data frame requires some tricks.
+```{r JAGS mixed-effect model}
+mixed.mod <- function(){
+  # Likelihood
+  for(i in 1:N){
+    # in this first line, we descibe each observation y_i 
+    # as a realization of a normal process, as before
+    y[i] ~ dnorm(mu[i], 1/sig.obs^2)
+    # here we define the observation-specific expectation
+    # as a linear function of the site-specific intercept
+    # and predictor variables; note that the vector of site means, alpha,
+    # is being indexed by the site of observation i, called from a vector called 'site'
+    mu[i] <- alpha[site[i]] + b1*x1[i] + b2*x2[i]
+  }
+  ## Random intercepts:
+   # Now we index across site-level means
+   # To declare each site-level intercept
+  for(j in 1:n.sites){
+    # each site-level intercept is a realization of a normal process:
+    alpha[j] ~ dnorm(alpha0, 1/sig.site^2) 
+  }
+  
+  # Priors
+  # (again, these are outside the loops because there is only one of each - 
+  # no need to make multiple declearations)
+  alpha0 ~ dnorm(0, .01)
+  b1 ~ dnorm(0, .01)
+  b2 ~ dnorm(0, .01)
+  
+  sig.obs ~ dgamma(1, .1)
+  sig.site ~ dgamma(1, .1)
+}
+```
+
+Same as before, we need a named list of all the data, and a list of named lists for initial values. Here, I saved 'parameters to save' as it's own vector. Just for kicks.
+
+```{r}
+dataList.mixedMod <- list(
+  y = lmm.data$y, # our observations
+  N = nrow(lmm.data), # the total number of observations, used to parameterize the for() loop
+  n.sites = length(unique(lmm.data$site)), # number of sites
+  site = as.numeric(lmm.data$site), # the vector of site identities for each observation.
+  x1 = lmm.data$x1,
+  x2 = lmm.data$x2
+)
+
+initial.values.lmm <- replicate(3, list(list(
+  alpha0 = rnorm(1, 0, 30),
+  b1 = rnorm(1, 0, 30),
+  b2 = rnorm(1, 0, 30),
+  sig.obs = rgamma(1, 1, .01),
+  sig.site = rgamma(1, 1, .01))))
+
+# Parameters to save as output. 
+# If desired, you can save each site-level mean also, 
+# but I do not do so here.
+params <- c('alpha0', 'b1', 'b2', 'sig.site', 'sig.obs')
+```
+
+Run the model and save mcmc and dataframe objects of the results:
+
+```{r run JAGS LMM, include = F}
+fm.mixedMod <- jags(
+  model.file = mixed.mod,
+  data = dataList.mixedMod,
+  inits = initial.values.lmm,
+  parameters.to.save = params,
+  n.iter = 40000,
+  n.burnin = 10000,
+  n.chains = 3,
+  n.thin = 3
+)
+fm.mixed.mcmc <- as.mcmc(fm.mixedMod)
+fm.mixed.dat <- as.data.frame(as.matrix(fm.mixed.mcmc))
+```
+
+```{r JAGS LMM diagnostics}
+traceplot(fm.mixed.mcmc)
+gelman.diag(fm.mixed.mcmc)
+```
+
+Plot posteriors for each parameter:
+(the apply function just automates making a plot across each column)
+```{r JAGS LMM results}
+sapply(1:ncol(fm.mixed.dat), function(x) {
+  plotPost(fm.mixed.dat[,x], main = colnames(fm.mixed.dat)[x])
+  })
+```
+
+# Try it on your own!
+
+## Simple model
+
+Here we'll use some real world data (from Olaf Jensen's thesis). It is a dataset of crab burrow density, and we'll model crab burrow density as a function of salinity. This is count data, so it could be modeled with a Poisson or negative-binomial. For simplicity, here, we won't worry about which is better and just use a Poisson. Recall that in Poisson regression, we use the log link, so the linear model predicts the log of the expectation:
+$$ Poisson(y_i|\lambda_i)$$ $$ln(\lambda_i) = \alpha + \beta_1 X_1$$
+Note, this can also be written as, $$ Poisson(y_i|\lambda_i)$$ $$\lambda_i = e^{\alpha + \beta_1 X_1}$$
+  
+*Question*: Draw the Bayesian network of this model, and write out the mathematical probability statement. For priors, use normal(mean = 0, sd = 10) on the interecept and beta coefficient.
+
+```{r Try it - data}
+crabs <- read.csv('8_crab_burrows.csv')
+crabs$salinity <- crabs$salinity - mean(crabs$salinity) # center on 0
+head(crabs)
+```
+
+Below, translate your probability statement into a JAGs model. Remember, for() loops are your product symbols. Use the priors desribed above.
+
+```{r Try it - crab model}
+crab.mod <- function(){
+  for(i in 1:N){
+    y[i] ~ dpois(lambda[i]) 
+    lambda[i] <- exp(alpha + b1*x[i])
+  } 
+  
+  # Priors:
+  alpha ~ dnorm(0, 0.01)
+  b1 ~ dnorm(0, 0.01)
+
+}
+
+
+```
+
+Here, set up your data list and initial values.
+```{r Crab model set up, eval=F}
+datList.crabs <- list(
+  y = crabs$burrows, # observations themselves
+  N = nrow(crabs), # number of observations
+  x = crabs$salinity  # salinity data
+)
+
+initial.values.abund <- replicate(3, list(list(
+    alpha = rnorm(1, 0, 30), 
+    b1 = rnorm(1, 0, 30) 
+)))
+```
+
+Now run the model. You'll need to fill in the parameters you want saved with whatever names you gave them in your model. So you don't need to worry about it (yet!), I filled in the rest.
+```{r Crab model - run, eval=F}
+fm.crabs <- jags(
+  data = datList.crabs,
+  model.file = crab.mod,
+  parameters.to.save = c("b1","alpha"),
+  n.chains = 3,
+  n.iter = 20000,
+  n.burnin = 5000,
+  n.thin = 3
+)
+
+# mcmc object is a special list for JAGS related functions/packages:
+fm.crabs.mcmc <- as.mcmc(fm.crabs) 
+# Then a data frame,
+# in which each column is a parameter
+# and each row is an iteration of the MCMC chain
+# (the chains are listed one after the next as with rbind())
+fm.crabs.dat <- as.data.frame(as.matrix(fm.crabs.mcmc))
+```
+
+Run diagnostics - make traceplots and calculate the Gelman diagnostic.
+```{r Crab model - diagnostics, eval=F}
+traceplot(fm.crabs.mcmc)
+gelman.diag(fm.crabs.mcmc)
+
+```
+
+Plot your results using `plotPost()`. In addition to plotting posteriors of just your parameters, plot the posterior for the mean number of burrows. Remember, your parameters are on the log scale. Give each plot a meaningful/interpretable title (e.g. "Effect of salinity" rather than "beta").
+```{r Crab model - results, eval=F}
+plotPost(fm.crabs.dat$alpha, main = "Log Estimation of Crab Burrows at Mean Salinity")
+plotPost(exp(fm.crabs.dat$alpha), main = "Estimation of Crab Burrows at Mean Salinity")
+plotPost(fm.crabs.dat$b1, main = 'Effect of Salinity on Crab Burrows (Log)')
+summary(fm.crabs.mcmc)
+
+```
+
+*Question* Interpret these results. Specifically:
+* What is the mean (or expected) number of burrows and its confidence interval?
+* What does in the intercept mean? How would your interpretation of the intercept change if you we hadn't centered salinity measurements?
+* What is the effect of salinity and its confidence interval?
+* Given our data and assumptions, what is the probability that salinity has no effect (approximately)?
+
+*Answer:*
+* The mean number of burrows is 11, the confidence interval is from 9.59 to 12.6.
+* Intercept (alpha) means the log crab burrow density at mean salinity level. If we hadn't
+centered the salinity measurements, the interpretation will be the log crab burrow density when the salinity is zero. By centering the salinity, we can see the variations directly.
+* The effect if salinity of log(crab burrow) is 0.0339 (transform to number of crab burrow is 1.03), the confidence interval is from
+0.0201 to 0.0473.
+* By looking at the marginal posterior distributions of beta, we can say that the probability of salinity has no effect is around zero, the distribution
+starts at 0.01 means it at least have some small effect.
+
+## Hierarchical model
+
+Next, we'll try a hierarchical (random-intercept) model.
+
+These are data from my masters thesis, in which I studied prevalence of the tick-borne pathogen *Ehrlichia chaffeensis* across different landscapes. I have simplified the dataset by consolidating EC occurrence across years, and omitting heterogeneity in tick abundance. I have also only included three varaibles: proportion of forest within the surrounding 100 ha, length of forest edge within that 100 ha, and the proportion of that forest that is evergreen/coniferous. Notice that there are plots nested within sites, and so we need to account for potential covariance of plots within sites.
+
+In this version of the dataset, EC occurrence is recorded as presence-absence, so this will need to be a binomial/logistic regression. The model we want to write will predict the presence of EC as a function of forest cover, forest edge, and evergreen forest cover. Hypotheses being that forest size, fragmentation, and 'quality' will affect vertebrate host density and changes in host density will change pathogen prevalence. Specifically, I expected that large, fragmented, deciduous forests would have higher probabilities of detecting EC.
+
+```{r EC data}
+# FYI: Data are centered/scaled
+ticks <- read.csv("8_Ehrlichia_occurrence.csv")
+glimpse(ticks)
+```
+
+*Question*: Draw the Bayesian network and write the probability statement for a logistic regression model with 3 predictors and a random intercept. Hint: in a logistic regression, our observations are considered the realization of a Bernoulli process. Recall that the form for logistic regression is $$ y_i \sim bern(p)$$ $$logit(p) = \beta_0 + BX$$ where y is an observation of a binary event, p is the probability of that event, and logit(p) is the log of the odds ratio (i.e. successes/failures). Because your variables are on the logit scale, we need to be careful with their priors. Transforming distributions on the logit scale back into probabilities can be counter-intuitive. Here, give the grand mean a normal prior with mean = 0 and variance = 2, betas a normal prior with mean = 0 and variance = 5, and the among site variance a gamma prior with parameters 1, 1.
+
+Below, translate your probability statement into a JAGs model. Remember, for() loops are your product symbols.
+Use dbern(p) to denote a Bernoulli process, and logit() for the logit transformation (or ilogit() as the inverse, if you prefer). Use the priors described above.
+
+```{r Try it - EC model, eval=F}
+tick.mod <- function(){
+  for(i in 1:N){
+    y[i] ~ dbern(p[i])
+    logit(p[i]) <- beta[site[i]] + b1*x1[i] + b2*x2[i] + b3*x3[i]
+  }
+
+  
+  for(j in 1:n.sites){
+    beta[j] ~ dnorm(beta0, 1/sig.site^2) 
+  }
+  
+  # Priors
+  beta0 ~ dnorm(0, .5)
+  b1 ~ dnorm(0, .2)
+  b2 ~ dnorm(0, .2)
+  b3 ~ dnorm(0, .2)
+
+  sig.site ~ dgamma(1,1)
+}
+```
+
+Here, set up your data list and initial values.
+```{r Try it - set up, eval=F}
+datList.ticks <- list(
+  N = nrow(ticks), # Number observations
+  y = ticks$ec,  # the observations themselves
+  x1 = ticks$forest, # forest area
+  x2 = ticks$edge, # forest edge
+  x3 = ticks$evergreen, # evergreen forest
+  site = as.factor(ticks$site), # site
+  n.sites = length(unique(ticks$site)) # number of sites
+)
+
+initial.values.ticks <- replicate(3, list(list(
+  beta0 = rnorm(1, 0, 30),
+  b1 = rnorm(1, 0, 30),
+  b2 = rnorm(1, 0, 30),
+  b3 = rnorm(1, 0, 30),
+  sig.site = rgamma(1, 1, .01)
+  
+)))
+```
+
+Run the model:
+```{r Try it - run, eval=F}
+fm.ticks <- jags(
+  data = datList.ticks,
+  model.file = tick.mod,
+  parameters.to.save = c("beta0","b1","b2","b3","sig.site") ,
+  n.chains = 3,
+  n.iter = 20000,
+  n.burnin = 5000,
+  n.thin = 3
+)
+
+fm.ticks.mcmc <- as.mcmc(fm.ticks)
+fm.ticks.dat <- as.data.frame(as.matrix(fm.ticks.mcmc))
+```
+
+Run traceplots and Gelman's diagnostic:
+```{r Try it- diagnostics, eval=F}
+traceplot(fm.ticks.mcmc)
+gelman.diag(fm.ticks.mcmc)
+
+```
+
+Plot posteriors for EC occurrence, the effects of forest area, edge, and type, and the among-site variacne in EC occurrence. Give interpretable titles to your plots. If you want to transform the intercept from log-odds scale to probabilty, use the plogis() function.
+```{r Try it - results, eval=F}
+plotPost(fm.ticks.dat$beta0, main = "Ec Occurrence for Mean Area, Edge and Type")
+plotPost(plogis(fm.ticks.dat$beta0), main = "Probablity of Ec Occurrence for Mean Area, Edge and Type ")
+plotPost(fm.ticks.dat$b1, main = "Effect of Forest Area ")
+plotPost(fm.ticks.dat$b2, main = "Effect of Forest Edge ")
+plotPost(fm.ticks.dat$b3, main = "Effect of Forest type ")
+
+
+```
+
+*Question* Interpret these results. What was EC occupancy (I.e. probability of a plot testing positive)? Was there evidence for an effect of any of these variables? What would your general conclusions be?
+
+*Answer:* The mean probability of a plot testing positive is around 0.265, with the CI from 0.149 to 0.426. By looking at the distributions, forest area
+and forest edge have all negative relationship between EC occupancy. Which means the larger the forest area and the longer the edge, the lower the likelihood of EC occupancy.The type of tree don't have a clear effect on EC occupancy because we can see the distribution can be either positive or
+negative.
